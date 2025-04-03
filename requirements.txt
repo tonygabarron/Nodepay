@@ -1,0 +1,4 @@
+distro
+python-dotenv
+selenium
+requests

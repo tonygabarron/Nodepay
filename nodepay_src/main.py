@@ -16,8 +16,36 @@ from dotenv import load_dotenv # <--- ADICIONADO: Importar a biblioteca
 def setup_logging():
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-# ... (connection_status, check_active_element, wait_for_element_exists, wait_for_element) ...
-# Nenhuma mudança necessária nessas funções auxiliares
+def connection_status(driver):
+    if wait_for_element_exists(driver, By.XPATH, "//*[text()='Connected']"):
+        logging.info("Status: Connected!")
+    elif wait_for_element_exists(driver, By.XPATH, "//*[text()='Disconnected']"):
+        logging.warning("Status: Disconnected!")
+    else:
+        logging.warning("Status: Unknown!")
+
+def check_active_element(driver):
+    try:
+        wait_for_element(driver, By.XPATH, "//*[text()='Activated']")
+        driver.find_element(By.XPATH, "//*[text()='Activated']")
+        logging.info("Extension is activated!")
+    except NoSuchElementException:
+        logging.error("Failed to find 'Activated' element. Extension activation failed.")
+
+def wait_for_element_exists(driver, by, value, timeout=10):
+    try:
+        WebDriverWait(driver, timeout).until(EC.presence_of_element_located((by, value)))
+        return True
+    except TimeoutException:
+        return False
+
+def wait_for_element(driver, by, value, timeout=10):
+    try:
+        element = WebDriverWait(driver, timeout).until(EC.presence_of_element_located((by, value)))
+        return element
+    except TimeoutException as e:
+        logging.error(f"Error waiting for element {value}: {e}")
+        raise
 
 def set_local_storage_item(driver, key, value):
     # Função para lidar com aspas na chave, se houver
@@ -39,8 +67,30 @@ def add_cookie_to_local_storage(driver, cookie_value):
     logging.info("Token should now be in local storage.")
     #logging.info("!!!!! Your token can be used to login for 7 days !!!!!") # Talvez remover ou tornar opcional
 
-# ... (get_chromedriver_version, get_os_info) ...
-# Nenhuma mudança necessária nessas funções
+def get_chromedriver_version():
+    try:
+        result = subprocess.run(['chromedriver', '--version'], capture_output=True, text=True)
+        return result.stdout.strip()
+    except Exception as e:
+        logging.error(f"Could not get ChromeDriver version: {e}")
+        return "Unknown version"
+
+def get_os_info():
+    try:
+        os_info = {
+            'System': platform.system(),
+            'Version': platform.version()
+        }
+        
+        if os_info['System'] == 'Linux':
+            os_info.update({
+                'System': distro.name(pretty=True),
+                'Version': distro.version(pretty=True, best=True)
+            })
+        return os_info
+    except Exception as e:
+        logging.error(f"Could not get OS information: {e}")
+        return "Unknown OS"
 
 def run():
     setup_logging()
