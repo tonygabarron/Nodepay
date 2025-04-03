@@ -1,0 +1,25 @@
+services:
+    nodepay:
+        container_name: Nodepay
+        build:
+            # Contexto relativo: Procura o Dockerfile na pasta 'nodepay_src'
+            # localizada no mesmo nível do docker-compose.yml
+            context: ./nodepay_src
+            # dockerfile: Dockerfile  # Descomente se o nome do seu Dockerfile for diferente
+        restart: unless-stopped
+        volumes:
+            # Volume relativo: Mapeia a pasta './nodepay_config' do host
+            # (no mesmo nível do docker-compose.yml) para '/app/config' no container.
+            # Certifique-se que sua aplicação nodepay lê /app/config/.env
+            - ./nodepay_config:/app/config
+        networks:
+            default:
+                ipv4_address: 172.106.0.70
+
+networks:
+    default:
+        driver: bridge
+        ipam:
+            driver: default
+            config:
+                - subnet: 172.106.0.0/16
