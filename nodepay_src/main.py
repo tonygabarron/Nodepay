@@ -1,3 +1,5 @@
+# nodepay_src/main.py (Version with Claim Button)
+
 import os
 import distro
 import platform
@@ -8,345 +10,305 @@ import logging
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
-from selenium.common.exceptions import NoSuchElementException, TimeoutException
+from selenium.common.exceptions import NoSuchElementException, TimeoutException, ElementClickInterceptedException
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from dotenv import load_dotenv # <--- ADICIONADO: Importar a biblioteca
+from dotenv import load_dotenv
 
-def setup_logging():
-    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+# --- Global Settings ---
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+# Path to the .env file INSIDE the container
+DOTENV_PATH = '/app/config/.env'
+# Default wait timeout for Selenium elements
+DEFAULT_WAIT_TIMEOUT = 20
+# Interval between checks in the main loop (1 hour)
+CHECK_INTERVAL_SECONDS = 3600
+# Delay before exiting to allow restart by Docker
+RESTART_DELAY_SECONDS = 60
 
-def connection_status(driver):
-    if wait_for_element_exists(driver, By.XPATH, "//*[text()='Connected']"):
-        logging.info("Status: Connected!")
-    elif wait_for_element_exists(driver, By.XPATH, "//*[text()='Disconnected']"):
-        logging.warning("Status: Disconnected!")
-    else:
-        logging.warning("Status: Unknown!")
+# --- Essential Helper Functions ---
 
-def check_active_element(driver):
+def wait_for_element(driver, by, value, timeout=DEFAULT_WAIT_TIMEOUT):
+    """Waits for an element to be present and returns it."""
     try:
-        wait_for_element(driver, By.XPATH, "//*[text()='Activated']")
-        driver.find_element(By.XPATH, "//*[text()='Activated']")
-        logging.info("Extension is activated!")
-    except NoSuchElementException:
-        logging.error("Failed to find 'Activated' element. Extension activation failed.")
+        return WebDriverWait(driver, timeout).until(
+            EC.presence_of_element_located((by, value))
+        )
+    except TimeoutException:
+        logging.error(f"Timeout waiting for element: {by}={value}")
+        raise # Re-raise the exception to be handled upstream
 
-def wait_for_element_exists(driver, by, value, timeout=10):
+def check_element_exists(driver, by, value, timeout=5):
+    """Checks if an element exists without throwing an error if not found."""
     try:
-        WebDriverWait(driver, timeout).until(EC.presence_of_element_located((by, value)))
+        WebDriverWait(driver, timeout).until(
+            EC.presence_of_element_located((by, value))
+        )
         return True
     except TimeoutException:
         return False
 
-def wait_for_element(driver, by, value, timeout=10):
-    try:
-        element = WebDriverWait(driver, timeout).until(EC.presence_of_element_located((by, value)))
-        return element
-    except TimeoutException as e:
-        logging.error(f"Error waiting for element {value}: {e}")
-        raise
-
-def set_local_storage_item(driver, key, value):
-    # Função para lidar com aspas na chave, se houver
-    escaped_value = value.replace("'", "\\'")
-    driver.execute_script(f"localStorage.setItem('{key}', '{escaped_value}');")
-    result = driver.execute_script(f"return localStorage.getItem('{key}');")
-    return result
-
-def add_cookie_to_local_storage(driver, cookie_value):
-    keys = ['np_webapp_token', 'np_token']
-    logging.info(f"Attempting to add token to local storage...")
-    for key in keys:
-        result = set_local_storage_item(driver, key, cookie_value)
-        # Log apenas uma parte para segurança, e verifique se não está vazio
-        if result:
-             logging.info(f"Added {key} starting with '{result[:5]}...' to local storage.")
-        else:
-             logging.warning(f"Failed to set or retrieve {key} in local storage.")
-    logging.info("Token should now be in local storage.")
-    #logging.info("!!!!! Your token can be used to login for 7 days !!!!!") # Talvez remover ou tornar opcional
-
-def get_chromedriver_version():
-    try:
-        result = subprocess.run(['chromedriver', '--version'], capture_output=True, text=True)
-        return result.stdout.strip()
-    except Exception as e:
-        logging.error(f"Could not get ChromeDriver version: {e}")
-        return "Unknown version"
-
 def get_os_info():
+    """Gets basic OS information."""
     try:
-        os_info = {
-            'System': platform.system(),
-            'Version': platform.version()
-        }
-        
-        if os_info['System'] == 'Linux':
-            os_info.update({
-                'System': distro.name(pretty=True),
-                'Version': distro.version(pretty=True, best=True)
-            })
-        return os_info
+        if platform.system() == 'Linux':
+            return f"{distro.name(pretty=True)} {distro.version(pretty=True, best=True)}"
+        else:
+            return f"{platform.system()} {platform.version()}"
     except Exception as e:
-        logging.error(f"Could not get OS information: {e}")
-        return "Unknown OS"
+        logging.warning(f"Could not get OS info: {e}")
+        return "Unknown"
 
-def run():
-    setup_logging()
+# --- Main Logic ---
 
-    # --- MODIFICADO: Carregar variáveis do .env ---
-    # Caminho para o arquivo .env DENTRO do container (mapeado pelo volume)
-    dotenv_path = '/app/config/.env'
-    # Tenta carregar o arquivo .env do caminho especificado
-    loaded = load_dotenv(dotenv_path=dotenv_path)
+def run_nodepay():
+    logging.info(f"Starting Nodepay Script - OS: {get_os_info()}")
 
-    if loaded:
-        logging.info(f"Successfully loaded environment variables from {dotenv_path}")
-    else:
-        # Se o arquivo não for encontrado, o script pode falhar depois ao tentar ler NP_KEY.
-        # Você pode decidir parar aqui ou deixar a verificação posterior tratar disso.
-        logging.warning(f"Could not find or load .env file at {dotenv_path}. Make sure the volume is mounted correctly and the file exists.")
-        # Consider adding 'return' here if the key is absolutely required immediately.
-    # --------------------------------------------
+    # 1. Load Configuration
+    if not load_dotenv(dotenv_path=DOTENV_PATH):
+        logging.error(f".env file not found or could not be loaded at {DOTENV_PATH}. Check the volume.")
+        return False # Indicates initialization failure
 
-    branch = ''
-    version = '1.0.9' + branch
-    secUntilRestart = 60
-    logging.info(f"Started the script {version}")
+    np_key = os.getenv('NP_KEY')
+    extension_id = os.getenv('EXTENSION_ID') # Comes from Dockerfile ENV
+    extension_url = os.getenv('EXTENSION_URL') # Comes from Dockerfile ENV
 
+    if not np_key:
+        logging.error("NP_KEY variable not found in .env. Please ensure it exists.")
+        return False
+    if not extension_id or not extension_url:
+        logging.error("EXTENSION_ID or EXTENSION_URL not defined. Check the Dockerfile.")
+        return False
+
+    extension_crx_path = f'/app/{extension_id}.crx' # Path defined in Dockerfile
+    extension_internal_page = f'chrome-extension://{extension_id}/index.html'
+
+    if not os.path.exists(extension_crx_path):
+        logging.error(f"Extension file not found at {extension_crx_path}. Check the download step in the Dockerfile.")
+        return False
+
+    logging.info(f"Configuration loaded. EXTENSION_ID: {extension_id}")
+
+    # 2. Configure WebDriver
+    driver = None # Initialize as None so finally knows if cleanup is needed
     try:
-        os_info = get_os_info()
-        logging.info(f'OS Info: {os_info}')
-
-        # --- MODIFICADO: Ler NP_KEY e verificar ---
-        # Ler a variável NP_KEY (que foi carregada do .env para o ambiente pelo load_dotenv)
-        cookie = os.getenv('NP_KEY')
-        # Ler outras variáveis que ainda vêm do Dockerfile ENV
-        extension_id = os.getenv('EXTENSION_ID')
-        extension_url = os.getenv('EXTENSION_URL')
-
-        # Verificar se as variáveis essenciais foram carregadas/definidas
-        if not cookie:
-            # Mensagem de erro atualizada
-            logging.error('No key found. Ensure NP_KEY is set in the .env file mounted at /app/config/.env')
-            logging.info(f'Restarting in {secUntilRestart} seconds...')
-            time.sleep(secUntilRestart)
-            # Não use recursão direta para reiniciar, pode estourar a pilha.
-            # O Docker/Compose cuidará do restart se configurado (restart: unless-stopped)
-            # Apenas saia ou levante uma exceção para o Docker reiniciar.
-            return # Ou raise SystemExit("Missing NP_KEY")
-
-        if not extension_id or not extension_url:
-            logging.error('EXTENSION_ID or EXTENSION_URL environment variables not set. Check Dockerfile.')
-            return # Ou raise SystemExit("Missing extension config")
-        # ------------------------------------------
-
-        # --- MODIFICADO: Caminho absoluto para a extensão ---
-        # Construir caminho absoluto baseado no WORKDIR e download do Dockerfile
-        extension_path = f'/app/{extension_id}.crx'
-        logging.info(f"Using extension file path: {extension_path}")
-
-        # Verificar se o arquivo da extensão existe
-        if not os.path.exists(extension_path):
-            logging.error(f"Extension file not found at {extension_path}. Check Dockerfile download step and permissions.")
-            return # Ou raise SystemExit("Extension file missing")
-        # ---------------------------------------------
-
         chrome_options = Options()
-        # Usar o caminho absoluto
-        chrome_options.add_extension(extension_path)
+        chrome_options.add_extension(extension_crx_path)
         chrome_options.add_argument('--no-sandbox')
-        chrome_options.add_argument('--headless=new') # Use a nova versão do headless
+        chrome_options.add_argument('--headless=new')
         chrome_options.add_argument('--disable-dev-shm-usage')
-        # Talvez adicionar:
-        chrome_options.add_argument('--disable-gpu') # Útil em ambientes headless
-        chrome_options.add_argument('--window-size=1024,768') # Definir tamanho inicial
-        chrome_options.add_argument("--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36 Edg/121.0.0.0") # User agent já estava ok
+        chrome_options.add_argument('--disable-gpu')
+        chrome_options.add_argument('--window-size=1024,768')
+        # User agent might help avoid detection
+        chrome_options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36")
 
-        # Inicializar o WebDriver
-        chromedriver_version = get_chromedriver_version()
-        logging.info(f'Using {chromedriver_version}')
-        # Pode ser necessário especificar o caminho do chromedriver se não estiver no PATH padrão
-        # driver = webdriver.Chrome(service=Service('/usr/bin/chromedriver'), options=chrome_options) # Exemplo se necessário
-        driver = webdriver.Chrome(options=chrome_options) # Tenta usar o do PATH primeiro
+        logging.info("Initializing WebDriver...")
+        # Try using chromedriver from the default PATH
+        driver = webdriver.Chrome(options=chrome_options)
+        logging.info(f"WebDriver initialized. ChromeDriver Version: {driver.capabilities.get('chrome', {}).get('chromedriverVersion', 'N/A')}")
 
-    except Exception as e:
-        logging.error(f'An error occurred during setup: {e}', exc_info=True) # Adiciona traceback
-        logging.info(f'Restarting attempt in {secUntilRestart} seconds...')
-        time.sleep(secUntilRestart)
-        # Deixe o Docker/Compose reiniciar em vez de chamar run() recursivamente
-        raise e # Levanta a exceção para sinalizar falha
-
-    try:
-        # NodePass checks for width less than 1024p - window size set in options now
-        # driver.set_window_size(1024, driver.get_window_size()['height']) # Removido, setado nas options
-
-        logging.info(f'Navigating to {extension_url} website...')
+        # 3. Login to Nodepay Website (via Local Storage)
+        logging.info(f"Navigating to {extension_url}...")
         driver.get(extension_url)
-        # Esperar um pouco mais ou usar WebDriverWait para um elemento específico da página
-        time.sleep(random.randint(5, 10)) # Aumentar um pouco
+        time.sleep(random.randint(3, 6)) # Short pause for the page to load
 
-        add_cookie_to_local_storage(driver, cookie)
-        # Esperar um pouco para o localStorage ser processado e a página talvez recarregar
-        time.sleep(random.randint(3, 7))
-        # Recarregar a página explicitamente para garantir que o token seja usado
-        logging.info("Refreshing page after setting token...")
-        driver.refresh()
+        logging.info("Injecting token into Local Storage...")
+        escaped_key = np_key.replace("'", "\\'") # Escape single quotes if any
+        driver.execute_script(f"localStorage.setItem('np_trigger_1346947533587562496_x', 'checked');")
+        driver.execute_script(f"localStorage.setItem('np_webapp_token', '{escaped_key}');")
+        driver.execute_script(f"localStorage.setItem('np_token', '{escaped_key}');")
 
-        # Esperar pelo elemento 'Dashboard' aparecer após o refresh
-        logging.info("Waiting for 'Dashboard' element to confirm login...")
+        # Check if the token was set (optional, but good for debugging)
+        stored_token = driver.execute_script("return localStorage.getItem('np_token');")
+        if stored_token and stored_token.startswith(np_key[:5]):
+             logging.info("Token successfully injected into Local Storage.")
+        else:
+             logging.warning("Failed to verify token in Local Storage after injection.")
+
+        logging.info(f"Opening page {extension_url}dashboard to apply the token and verify login...")
+        driver.get(f"{extension_url}dashboard")
+
+        # Verify login by waiting for a dashboard element
         try:
-            wait_for_element(driver, By.XPATH, "//*[text()='Dashboard']", timeout=30) # Aumentar timeout
-            logging.info('Logged in successfully! Dashboard element found.')
+            wait_for_element(driver, By.XPATH, "//*[text()='Dashboard']", timeout=30)
+            logging.info("Website login successful ('Dashboard' element found).")
         except TimeoutException:
-            logging.error("'Dashboard' element not found after setting token and refreshing. Check token validity and website behavior.")
-            # Você pode querer tirar um screenshot aqui para debug: driver.save_screenshot('login_fail.png')
-            raise # Re-levanta a exceção para acionar o reinício
+            logging.error("Failed to log in to the website - 'Dashboard' not found after refresh. Check the validity of NP_KEY.")
+            # driver.save_screenshot('/app/config/login_failure.png') # Uncomment for debugging
+            return False # Critical failure
 
-        # Esperar um pouco antes de ir para a extensão
-        time.sleep(random.randint(5, 15))
-        extension_page_url = f'chrome-extension://{extension_id}/index.html'
-        logging.info(f'Accessing extension settings page: {extension_page_url}')
-        driver.get(extension_page_url)
-        time.sleep(random.randint(5, 10)) # Aumentar um pouco
+        # <<< START: Logic to click the 'Claim' button >>>
+        claim_button_xpath = "//div[contains(@class, 'cursor-pointer') and contains(@class, 'bg-[#58CC02]')][.//div[contains(text(), 'Claim')]]"
+        logging.info("Checking for the existence of the 'Claim' button on the dashboard...")
 
-        # --- Lógica de Login/Ativação da Extensão ---
-        # A lógica original parece um pouco complexa e talvez propensa a race conditions.
-        # Vamos simplificar e tornar mais robusto.
+        if check_element_exists(driver, By.XPATH, claim_button_xpath, timeout=10):
+            logging.info("'Claim' button found!")
+            try:
+                # Wait a bit longer to ensure the button is ready for click
+                claim_button = wait_for_element(driver, By.XPATH, claim_button_xpath, timeout=15)
 
-        # 1. Verificar se já está Ativado primeiro (caso ideal)
-        try:
-            wait_for_element(driver, By.XPATH, "//*[text()='Activated']", timeout=15)
+                # Scroll to the button
+                logging.info("Centering the 'Claim' button on the screen...")
+                driver.execute_script("arguments[0].scrollIntoView({block: 'center', inline: 'nearest'});", claim_button)
+                time.sleep(random.uniform(0.5, 1.5)) # Short pause after scroll
+
+                # Wait until the button is clickable
+                claim_button_clickable = WebDriverWait(driver, 10).until(
+                    EC.element_to_be_clickable((By.XPATH, claim_button_xpath))
+                )
+
+                logging.info("Clicking the 'Claim' button...")
+                claim_button_clickable.click()
+                logging.info("'Claim' button clicked successfully.")
+                # Short pause for the 'Claim' action to process
+                time.sleep(random.randint(3, 6))
+
+            except ElementClickInterceptedException:
+                 logging.warning("'Claim' button intercepted. Trying to click via JavaScript...")
+                 try:
+                     # Find the element again before attempting JS click
+                     claim_button_js = driver.find_element(By.XPATH, claim_button_xpath)
+                     driver.execute_script("arguments[0].click();", claim_button_js)
+                     logging.info("'Claim' button clicked successfully via JavaScript.")
+                     time.sleep(random.randint(3, 6))
+                 except Exception as js_click_err:
+                     logging.error(f"Failed to click 'Claim' button via JavaScript: {js_click_err}")
+                     # driver.save_screenshot('/app/config/claim_js_click_failure.png') # Uncomment for debugging
+            except (TimeoutException, NoSuchElementException) as e:
+                logging.error(f"Error trying to find or click the 'Claim' button after initially finding it: {e}")
+                # driver.save_screenshot('/app/config/claim_click_failure.png') # Uncomment for debugging
+            except Exception as e:
+                logging.error(f"Unexpected error trying to click the 'Claim' button: {e}", exc_info=True)
+                # driver.save_screenshot('/app/config/claim_unexpected_failure.png') # Uncomment for debugging
+        else:
+            logging.info("'Claim' button not found on the dashboard (this is normal if there's nothing to claim).")
+        # <<< END: Logic to click the 'Claim' button >>>
+
+        # 4. Extension Activation
+        logging.info(f"Accessing the extension's internal page: {extension_internal_page}")
+        driver.get(extension_internal_page)
+        time.sleep(random.randint(5, 10)) # Wait for the extension page to load
+
+        activated = False
+        # First, check if it's already activated
+        if check_element_exists(driver, By.XPATH, "//*[text()='Activated']"):
             logging.info("Extension is already activated.")
-            connection_status(driver) # Verificar status da conexão
-
-        except TimeoutException:
-            logging.info("'Activated' element not found initially. Checking for 'Login' or 'Activate' buttons.")
-
-            # 2. Se não estiver Ativado, procurar por 'Login'
+            activated = True
+        else:
+            # If not, try clicking Login
+            logging.info("'Activated' not found, looking for 'Login' button...")
             try:
                 login_button = wait_for_element(driver, By.XPATH, "//*[text()='Login']", timeout=10)
-                logging.info("Found 'Login' button, clicking it...")
+                logging.info("'Login' button found, clicking...")
                 login_button.click()
-                # Esperar um pouco e verificar se 'Activated' aparece após o login
-                try:
-                    wait_for_element(driver, By.XPATH, "//*[text()='Activated']", timeout=20)
-                    logging.info("Extension became 'Activated' after clicking Login.")
-                    connection_status(driver)
-                except TimeoutException:
-                    logging.error("Clicked 'Login', but 'Activated' element did not appear. Check extension behavior.")
-                    # Tentar recarregar e verificar novamente? Ou falhar?
-                    driver.refresh()
-                    time.sleep(5)
-                    try:
-                         wait_for_element(driver, By.XPATH, "//*[text()='Activated']", timeout=15)
-                         logging.info("Extension became 'Activated' after refresh.")
-                         connection_status(driver)
-                    except TimeoutException:
-                         logging.error("Still not 'Activated' after refresh. Activation failed.")
-                         raise # Falhar para reiniciar
-
-            except TimeoutException:
-                logging.info("'Login' button not found. Checking for 'Activate' button.")
-
-                # 3. Se não houver 'Login', procurar por 'Activate' (a lógica original estava comentada)
+                # Wait a bit for activation to occur after the click
+                wait_for_element(driver, By.XPATH, "//*[text()='Activated']", timeout=25)
+                logging.info("Extension activated after clicking 'Login'.")
+                activated = True
+            except (TimeoutException, NoSuchElementException):
+                logging.warning("'Login' button not found or did not lead to activation. Looking for 'Activate' button...")
+                # If Login failed or didn't exist, try clicking Activate
                 try:
                     activate_button = wait_for_element(driver, By.XPATH, "//*[text()='Activate']", timeout=10)
-                    logging.info("Found 'Activate' button, clicking it...")
+                    logging.info("'Activate' button found, clicking...")
                     activate_button.click()
-                    # Esperar um pouco e verificar se 'Activated' aparece
-                    try:
-                        wait_for_element(driver, By.XPATH, "//*[text()='Activated']", timeout=20)
-                        logging.info("Extension became 'Activated' after clicking Activate.")
-                        connection_status(driver)
-                    except TimeoutException:
-                        logging.error("Clicked 'Activate', but 'Activated' element did not appear.")
-                        # Tentar recarregar?
-                        driver.refresh()
-                        time.sleep(5)
-                        try:
-                            wait_for_element(driver, By.XPATH, "//*[text()='Activated']", timeout=15)
-                            logging.info("Extension became 'Activated' after refresh.")
-                            connection_status(driver)
-                        except TimeoutException:
-                            logging.error("Still not 'Activated' after refresh. Activation failed.")
-                            raise # Falhar para reiniciar
+                    wait_for_element(driver, By.XPATH, "//*[text()='Activated']", timeout=25)
+                    logging.info("Extension activated after clicking 'Activate'.")
+                    activated = True
+                except (TimeoutException, NoSuchElementException):
+                    logging.error("Failed to activate the extension. 'Login' or 'Activate' buttons not found or did not work.")
+                    # driver.save_screenshot('/app/config/activation_failure.png') # Uncomment for debugging
+                    return False # Critical failure
 
-                except TimeoutException:
-                    logging.warning("'Activate' button also not found. Current state is unclear, assuming activation failed or element changed.")
-                    # Se nem 'Activated', nem 'Login', nem 'Activate' foram encontrados, algo está errado.
-                    raise NoSuchElementException("Could not find expected elements ('Activated', 'Login', 'Activate') on extension page.")
+        if not activated:
+             logging.error("Could not confirm extension activation.")
+             return False
+
+        # 5. Check Initial Connection Status
+        if check_element_exists(driver, By.XPATH, "//*[text()='Connected']"):
+            logging.info("Initial connection status: Connected!")
+        elif check_element_exists(driver, By.XPATH, "//*[text()='Disconnected']"):
+            logging.warning("Initial connection status: Disconnected!")
+        else:
+            logging.warning("Initial connection status: Unknown (elements not found).")
 
 
-        # --- Limpeza de Janelas (Parece OK) ---
+        # 6. Clean Up Extra Windows (if any)
         all_windows = driver.window_handles
         if len(all_windows) > 1:
-             logging.info(f"Found {len(all_windows)} windows/tabs. Closing extras...")
-             active_window = driver.current_window_handle
-             for window in all_windows:
-                 if window != active_window:
-                     try:
-                         driver.switch_to.window(window)
-                         driver.close()
-                         logging.info(f"Closed window: {window}")
-                     except Exception as close_err:
-                         logging.warning(f"Could not close window {window}: {close_err}")
-             driver.switch_to.window(active_window) # Voltar para a principal
-             logging.info("Switched back to the main extension window.")
-        else:
-            logging.info("Only one window/tab open.")
-        # ------------------------------------
+            logging.info(f"Closing {len(all_windows) - 1} extra windows/tabs...")
+            main_window = driver.current_window_handle
+            for window in all_windows:
+                if window != main_window:
+                    try:
+                        driver.switch_to.window(window)
+                        driver.close()
+                    except Exception as e:
+                        logging.warning(f"Could not close window {window}: {e}")
+            driver.switch_to.window(main_window)
 
-        # Verificar status final
-        connection_status(driver)
 
-    except Exception as e:
-        logging.error(f'An error occurred during main execution: {e}', exc_info=True) # Log com traceback
-        logging.info(f'Attempting graceful shutdown and letting Docker handle restart...')
-        if 'driver' in locals() and driver:
-            driver.quit()
-        # Não chamar run() aqui, deixar o Docker reiniciar
-        raise e # Propagar a exceção para sinalizar falha ao Docker
+        # 7. Main Monitoring Loop
+        logging.info("Setup complete. Entering monitoring loop (checking every hour).")
+        while True:
+            time.sleep(CHECK_INTERVAL_SECONDS)
 
-    # --- Loop Principal (Parece OK, mas pode ser melhorado) ---
-    logging.info("Setup complete. Entering main loop (refreshing connection status hourly).")
-    while True:
-        try:
-            # Esperar por 1 hora (3600 segundos)
-            time.sleep(3600)
-            logging.info("Hourly check: Refreshing extension page and checking status...")
-            driver.refresh()
-            time.sleep(random.randint(5, 15)) # Esperar o refresh
-            # Re-verificar se ainda está ativado e conectado
+            logging.info("Periodic check: Reloading extension page and checking status...")
             try:
+                # Stay on the extension page to check the status
+                current_url = driver.current_url
+                if extension_internal_page not in current_url:
+                    logging.warning(f"WebDriver was not on the extension page ({extension_internal_page}). Navigating back.")
+                    driver.get(extension_internal_page)
+                    time.sleep(random.randint(5,10)) # Wait for load
+                else:
+                    driver.refresh()
+                    time.sleep(random.randint(10, 20)) # Longer wait after refresh
+
+                # Re-verify if still 'Activated'
                 wait_for_element(driver, By.XPATH, "//*[text()='Activated']", timeout=30)
-                connection_status(driver)
+
+                # Check connection status
+                if check_element_exists(driver, By.XPATH, "//*[text()='Connected']"):
+                    logging.info("Connection status: Connected.")
+                elif check_element_exists(driver, By.XPATH, "//*[text()='Disconnected']"):
+                    logging.warning("Connection status: Disconnected!")
+                else:
+                    logging.warning("Connection status: Unknown.")
+
             except TimeoutException:
-                logging.error("Extension no longer shows 'Activated' after refresh. Attempting restart sequence.")
-                # Aqui você pode tentar re-ativar ou simplesmente sair para o Docker reiniciar
-                raise RuntimeError("Extension lost 'Activated' state.") # Sinaliza problema
+                 logging.error("'Activated' element not found after periodic refresh. The extension might have stopped.")
+                 # driver.save_screenshot('/app/config/loop_timeout_failure.png') # Uncomment for debugging
+                 return False # Signals failure for restart
+            except Exception as loop_err:
+                 logging.error(f"Unexpected error in verification loop: {loop_err}", exc_info=True)
+                 return False # Signals failure for restart
 
-        except KeyboardInterrupt:
-            logging.info('KeyboardInterrupt received. Stopping the script...')
-            if 'driver' in locals() and driver:
-                driver.quit()
-            break # Sai do loop while
-        except Exception as loop_error:
-            logging.error(f"Error during hourly check: {loop_error}", exc_info=True)
-            logging.info("Attempting graceful shutdown and letting Docker handle restart...")
-            if 'driver' in locals() and driver:
-                driver.quit()
-            # Levanta a exceção para que o Docker possa reiniciar o container
-            raise loop_error # Sai do loop e sinaliza falha
+    except KeyboardInterrupt:
+        logging.info("Keyboard interrupt received. Shutting down...")
+        return True # Normal shutdown requested by user
+    except Exception as e:
+        logging.error(f"Critical error during execution: {e}", exc_info=True)
+        # Try to take screenshot if driver still exists
+        # if driver:
+        #     try:
+        #         driver.save_screenshot('/app/config/critical_error.png')
+        #     except Exception:
+        #         pass
+        return False # Signals critical failure
+    finally:
+        if driver:
+            logging.info("Closing WebDriver...")
+            driver.quit()
 
-# --- Ponto de Entrada ---
+
+# --- Entry Point ---
 if __name__ == "__main__":
-    try:
-        run()
-    except Exception as final_exception:
-        logging.error(f"Script exited due to an unhandled exception in run(): {final_exception}", exc_info=True)
-        # Sinaliza saída com erro para o Docker
-        exit(1)
-    logging.info("Script finished normally.")
-    exit(0)
+    success = run_nodepay()
+    if not success:
+        logging.info(f"Script encountered an error or failure. Container should restart (if configured). Waiting {RESTART_DELAY_SECONDS}s...")
+        time.sleep(RESTART_DELAY_SECONDS) # Give time for logs to be read before restart
+        exit(1) # Signal exit with error
+    else:
+        logging.info("Script finished normally.")
+        exit(0) # Signal normal exit

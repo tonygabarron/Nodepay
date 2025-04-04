@@ -2,15 +2,15 @@ services:
     nodepay:
         container_name: Nodepay
         build:
-            # Contexto relativo: Procura o Dockerfile na pasta 'nodepay_src'
-            # localizada no mesmo nível do docker-compose.yml
+            # Relative context: Looks for the Dockerfile in the 'nodepay_src' folder
+            # located at the same level as compose.yml
             context: ./nodepay_src
-            # dockerfile: Dockerfile  # Descomente se o nome do seu Dockerfile for diferente
+            # dockerfile: Dockerfile  # Uncomment if your Dockerfile has a different name
         restart: unless-stopped
         volumes:
-            # Volume relativo: Mapeia a pasta './nodepay_config' do host
-            # (no mesmo nível do docker-compose.yml) para '/app/config' no container.
-            # Certifique-se que sua aplicação nodepay lê /app/config/.env
+            # Relative volume: Maps the './nodepay_config' folder from the host
+            # (at the same level as compose.yml) to '/app/config' in the container.
+            # Make sure your nodepay application reads /app/config/.env
             - ./nodepay_config:/app/config
         networks:
             default:
