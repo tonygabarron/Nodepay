@@ -2,19 +2,14 @@ services:
     nodepay:
         container_name: Nodepay
         build:
-            # Relative context: Looks for the Dockerfile in the 'nodepay_src' folder
-            # located at the same level as compose.yml
             context: ./nodepay_src
-            # dockerfile: Dockerfile  # Uncomment if your Dockerfile has a different name
         restart: unless-stopped
         volumes:
-            # Relative volume: Maps the './nodepay_config' folder from the host
-            # (at the same level as compose.yml) to '/app/config' in the container.
-            # Make sure your nodepay application reads /app/config/.env
+            # Relative volume: Maps the './nodepay_config' to get .env updated file
             - ./nodepay_config:/app/config
         networks:
             default:
-                ipv4_address: 172.106.0.70
+                ipv4_address: 172.106.0.70 # Example static IP
 
 networks:
     default:
@@ -22,4 +17,4 @@ networks:
         ipam:
             driver: default
             config:
-                - subnet: 172.106.0.0/16
+                - subnet: 172.106.0.0/16 # Example subnet
